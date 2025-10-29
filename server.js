@@ -18,11 +18,12 @@ io.set('heartbeat interval', 10000);
 io.set('heartbeat timeout', 60000);
 
 // --- Global State ---
-var users = {};
+var users = {};           // username -> user
+var sockets = {};         // socket.id -> username
 var nbr_room = -1;
 var room_name = 'room';
 
-// --- Heartbeat (single loop, not per-client) ---
+// --- Heartbeat ---
 function sendHeartbeat() {
     io.sockets.emit('ping', { beat: 1 });
     setTimeout(sendHeartbeat, 8000);
@@ -47,22 +48,36 @@ io.sockets.on('connection', function (socket) {
     socket.on('login', function (user) {
         if (!user || !user.username) return;
 
-        me = user;
+        // Remove stale socket links if found
+        for (let id in sockets) {
+            if (sockets[id] === user.username && id !== socket.id) {
+                delete sockets[id];
+            }
+        }
 
-        if (!users[me.username]) {
-            socket.emit('logged');
-            me.socket_id = socket.id;
-            users[me.username] = me;
+        // If this socket already logged something before, clean it
+        if (me && me.username && users[me.username]) {
+            delete users[me.username];
+        }
 
-            io.sockets.emit('newuser', me);
-            socket.emit('current_user', me);
-
-            console.log(`${me.username} logged in`);
-        } else {
-            me = false;
+        // username taken?
+        if (users[user.username]) {
             socket.emit('change_pseudo', false);
             console.log("Username already taken");
+            return;
         }
+
+        // good login
+        me = user;
+        me.socket_id = socket.id;
+        users[me.username] = me;
+        sockets[socket.id] = me.username;
+
+        socket.emit('logged');
+        io.sockets.emit('newuser', me);
+        socket.emit('current_user', me);
+
+        console.log(`${me.username} logged in`);
     });
 
     // --- Invite ---
@@ -104,7 +119,6 @@ io.sockets.on('connection', function (socket) {
         me.room = room_name;
         io.emit('disuseur', me);
 
-        // no delete from users here — keep user until disconnect
         socket.join(room_name);
 
         io.in(room_name).emit('start', room_name);
@@ -150,17 +164,20 @@ io.sockets.on('connection', function (socket) {
     socket.on('disconnect', function () {
         console.log('User disconnected');
 
-        if (!me) return;
+        var username = sockets[socket.id];
+        if (!username) return;   // already cleaned or failed login
 
-        if (me.room) {
-            socket.broadcast.to(me.room).emit('disconenct_room');
+        var user = users[username];
+
+        if (user && user.room) {
+            socket.broadcast.to(user.room).emit('disconenct_room');
         }
 
-        io.emit('disuseur', me);
+        io.emit('disuseur', user);
 
-        if (users[me.username]) {
-            delete users[me.username];
-            console.log(`User ${me.username} removed from users`);
-        }
+        delete users[username];
+        delete sockets[socket.id];
+
+        console.log(`User ${username} removed from users`);
     });
 });
